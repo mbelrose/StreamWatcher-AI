@@ -1,5 +1,5 @@
 {
   "name": "StreamWatcher",
-  "description": "Monitor Twitch channels for live status using official Twitch API.",
+  "description": "Monitor Twitch channels for live status. Optimized for Linux Desktop via Tauri.",
   "requestFramePermissions": []
 }

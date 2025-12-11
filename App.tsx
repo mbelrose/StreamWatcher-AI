@@ -1,11 +1,12 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ChannelInput } from './components/ChannelInput';
 import { ScriptSettings } from './components/ScriptSettings';
 import { LiveCard } from './components/LiveCard';
 import { Toast } from './components/Toast';
 import { TwitchCredentialsInput } from './components/TwitchCredentials';
 import { getStreams, generateAppAccessToken } from './services/twitchService';
+import { platformService } from './services/platformService';
 import { ChannelStatus, ToastMessage, TwitchCredentials } from './types';
 import { DEFAULT_CHANNELS, DEFAULT_COMMAND_TEMPLATE, POLLING_INTERVALS } from './constants';
 
@@ -27,19 +28,9 @@ const App: React.FC = () => {
       let source = "none";
       let configData: any = null;
 
-      // 1. Try Config File (Electron IPC or Fetch)
+      // 1. Try Config File (Platform Agnostic)
       try {
-        if (window.electron) {
-          configData = await window.electron.readConfig();
-        } else {
-          const response = await fetch('/config.json');
-          if (response.ok) {
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-              configData = await response.json();
-            }
-          }
-        }
+        configData = await platformService.readConfig();
 
         if (configData) {
           const cId = configData.clientId || configData.TWITCH_CLIENT_ID;
@@ -52,7 +43,7 @@ const App: React.FC = () => {
               clientSecret: cSecret,
               accessToken: cToken || '' 
             };
-            source = window.electron ? "config.json (local)" : "config.json (web)";
+            source = `${platformService.getType()} config`;
           }
         }
       } catch (err) {
@@ -260,6 +251,8 @@ const App: React.FC = () => {
   }, [isPolling, pollingInterval, creds, checkStatus]);
 
   const liveChannels = Array.from(statuses.values()).filter((s: ChannelStatus) => s.isLive);
+  const platformName = platformService.getType() === 'tauri' ? 'Desktop (Tauri)' : platformService.getType() === 'electron' ? 'Desktop (Electron)' : 'Web';
+  const isDesktop = platformService.isDesktop();
 
   if (!creds) {
     return <TwitchCredentialsInput onSave={handleSaveCreds} />;
@@ -268,7 +261,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-twitch-bg text-gray-100 font-sans selection:bg-twitch selection:text-white">
       {/* Header */}
-      <header className={`bg-twitch-surface border-b border-black shadow-lg sticky top-0 z-20 ${window.electron ? 'drag-region' : ''}`}>
+      <header className={`bg-twitch-surface border-b border-black shadow-lg sticky top-0 z-20 ${isDesktop ? 'drag-region' : ''}`}>
         <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3">
              <div className="w-8 h-8 bg-twitch rounded flex items-center justify-center shadow-lg shadow-twitch/20">
@@ -276,7 +269,7 @@ const App: React.FC = () => {
                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.866v6.268a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
              </div>
-             <h1 className="text-xl font-bold tracking-tight">StreamWatcher <span className="text-xs font-normal text-gray-400 opacity-50">{window.electron ? 'Desktop' : 'Web'}</span></h1>
+             <h1 className="text-xl font-bold tracking-tight">StreamWatcher <span className="text-xs font-normal text-gray-400 opacity-50">{platformName}</span></h1>
           </div>
 
           <div className="flex items-center gap-4 no-drag">
@@ -388,10 +381,12 @@ const App: React.FC = () => {
          </div>
       </div>
       
-      {window.electron && (
+      {isDesktop && (
         <style>{`
           .drag-region { -webkit-app-region: drag; }
           .no-drag { -webkit-app-region: no-drag; }
+          /* Tauri specific drag region */
+          .drag-region { app-region: drag; }
         `}</style>
       )}
     </div>

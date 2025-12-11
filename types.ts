@@ -25,9 +25,12 @@ export interface TwitchCredentials {
 
 declare global {
   interface Window {
+    // Legacy Electron support
     electron?: {
       launchCommand: (command: string) => Promise<string>;
       readConfig: () => Promise<any>;
     };
+    // Tauri support
+    __TAURI__?: any;
   }
 }
