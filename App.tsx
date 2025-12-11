@@ -23,6 +23,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const initCredentials = async () => {
       let finalCreds: TwitchCredentials | null = null;
+      let source = "none";
 
       // 1. Try Config File
       try {
@@ -37,12 +38,12 @@ const App: React.FC = () => {
             const cToken = config.accessToken || config.TWITCH_ACCESS_TOKEN;
 
             if (cId) {
-              console.log("Loaded credentials from config.json");
               finalCreds = {
                 clientId: cId,
                 clientSecret: cSecret,
                 accessToken: cToken || '' // Empty token will trigger generation if secret exists
               };
+              source = "config.json";
             }
           }
         }
@@ -57,6 +58,7 @@ const App: React.FC = () => {
           clientSecret: process.env.TWITCH_CLIENT_SECRET,
           accessToken: process.env.TWITCH_ACCESS_TOKEN || ''
         };
+        source = "environment variables";
       }
 
       // 3. Fallback to LocalStorage
@@ -65,17 +67,24 @@ const App: React.FC = () => {
         const savedToken = localStorage.getItem('twitch_access_token');
         const savedSecret = localStorage.getItem('twitch_client_secret');
 
-        if (savedId && savedToken) {
+        if (savedId) {
           finalCreds = {
             clientId: savedId,
-            accessToken: savedToken,
+            accessToken: savedToken || '',
             clientSecret: savedSecret || undefined
           };
+          source = "localStorage";
         }
       }
 
       if (finalCreds) {
+        console.log(`[TwitchAuth] Credentials loaded from ${source}.`);
+        console.log(`[TwitchAuth] Client ID: ${finalCreds.clientId.substring(0, 4)}...`);
+        console.log(`[TwitchAuth] Secret Present: ${!!finalCreds.clientSecret}`);
+        console.log(`[TwitchAuth] Access Token Present: ${!!finalCreds.accessToken}`);
         setCreds(finalCreds);
+      } else {
+        console.log(`[TwitchAuth] No credentials found.`);
       }
     };
 
@@ -83,11 +92,16 @@ const App: React.FC = () => {
   }, []);
 
   const handleSaveCreds = useCallback((newCreds: TwitchCredentials) => {
+    console.log(`[TwitchAuth] Saving new credentials. Secret included: ${!!newCreds.clientSecret}`);
     setCreds(newCreds);
     localStorage.setItem('twitch_client_id', newCreds.clientId);
     localStorage.setItem('twitch_access_token', newCreds.accessToken);
     if (newCreds.clientSecret) {
       localStorage.setItem('twitch_client_secret', newCreds.clientSecret);
+    } else {
+      // If no secret provided in update, do NOT remove existing one from local storage?
+      // Actually, if user updates creds manually, they might want to clear it.
+      // But for internal updates (token refresh), we pass the existing secret, so this is safe.
     }
   }, []);
 
@@ -165,16 +179,24 @@ const App: React.FC = () => {
 
     try {
       // 1. If we have a secret but no token (or empty token), generate one first
-      if ((!activeToken || activeToken.length === 0) && creds.clientSecret) {
-        try {
-          console.log("Token missing, generating new one...");
-          const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
-          activeToken = newToken;
-          tokenChanged = true;
-        } catch (genError: any) {
-          addToast('Auth Error', `Could not generate token: ${genError.message}`, 'error');
-          setIsChecking(false);
-          return;
+      if ((!activeToken || activeToken.length === 0)) {
+        if (creds.clientSecret) {
+            try {
+              console.log("[TwitchAuth] Token missing, generating new one using secret...");
+              const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
+              activeToken = newToken;
+              tokenChanged = true;
+            } catch (genError: any) {
+              addToast('Auth Error', `Could not generate token: ${genError.message}`, 'error');
+              setIsChecking(false);
+              return;
+            }
+        } else {
+             // No token and no secret
+             addToast('Auth Error', 'Missing Access Token and Client Secret', 'error');
+             setCreds(null); // Force logout to re-enter
+             setIsChecking(false);
+             return;
         }
       }
 
@@ -183,24 +205,36 @@ const App: React.FC = () => {
         fetchedStreams = await getStreams(channels, creds.clientId, activeToken);
       } catch (e: any) {
         // 3. Handle Unauthorized: Retry with refresh if secret is available
-        if (e.message.includes('Unauthorized') && creds.clientSecret) {
-          console.log('Token expired or invalid, attempting refresh...');
-          try {
-            const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
-            activeToken = newToken;
-            tokenChanged = true;
-            // Retry fetch with new token
-            fetchedStreams = await getStreams(channels, creds.clientId, newToken);
-          } catch (refreshErr: any) {
-            throw new Error(`Failed to refresh token: ${refreshErr.message}`);
+        if (e.message.includes('Unauthorized') || e.message.includes('401')) {
+          console.log('[TwitchAuth] Token expired or invalid (401).');
+          if (creds.clientSecret) {
+            console.log('[TwitchAuth] Attempting refresh using Client Secret...');
+            try {
+              const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
+              activeToken = newToken;
+              tokenChanged = true;
+              // Retry fetch with new token
+              fetchedStreams = await getStreams(channels, creds.clientId, newToken);
+              console.log('[TwitchAuth] Refresh successful.');
+            } catch (refreshErr: any) {
+              throw new Error(`Failed to refresh token: ${refreshErr.message}`);
+            }
+          } else {
+            console.error('[TwitchAuth] Cannot refresh: No Client Secret available.');
+            throw e; 
           }
         } else {
-          throw e; // Propagate other errors or if no secret available
+          throw e; // Propagate other errors
         }
       }
 
       if (tokenChanged) {
-        handleSaveCreds({ ...creds, accessToken: activeToken });
+        // IMPORTANT: Pass the existing secret back so it isn't lost
+        handleSaveCreds({ 
+            clientId: creds.clientId,
+            accessToken: activeToken,
+            clientSecret: creds.clientSecret 
+        });
       }
 
       if (fetchedStreams) {
@@ -211,7 +245,7 @@ const App: React.FC = () => {
       console.error(e);
       addToast('Check Failed', e.message || 'Error querying Twitch API', 'error');
       // Only clear creds if we absolutely cannot recover (no secret to regenerate)
-      if (e.message.includes('Unauthorized') && !creds.clientSecret) {
+      if ((e.message.includes('Unauthorized') || e.message.includes('401')) && !creds.clientSecret) {
         setCreds(null);
       }
     } finally {
@@ -307,6 +341,14 @@ const App: React.FC = () => {
                 <p>Channels Monitored: <span className="text-white">{channels.length}</span></p>
                 <p>Currently Live: <span className="text-green-400 font-bold">{liveChannels.length}</span></p>
                 <p>Last Check: <span className="text-white">{isChecking ? 'Checking...' : new Date().toLocaleTimeString()}</span></p>
+                {creds && (
+                    <div className="mt-2 pt-2 border-t border-gray-800 text-xs">
+                        <p>Credentials loaded via <span className="text-twitch-light">
+                           {/* Simple heuristic to display source type could go here, but we just log it to console for debug */}
+                           {creds.clientSecret ? 'Config/Env (Auto-refresh enabled)' : 'Manual Entry (No auto-refresh)'}
+                        </span></p>
+                    </div>
+                )}
              </div>
           </div>
         </div>

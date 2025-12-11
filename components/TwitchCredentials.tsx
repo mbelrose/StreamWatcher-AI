@@ -8,6 +8,7 @@ interface TwitchCredentialsProps {
 
 export const TwitchCredentialsInput: React.FC<TwitchCredentialsProps> = ({ onSave }) => {
   const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
   const [accessToken, setAccessToken] = useState('');
   const [isValidating, setIsValidating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -16,21 +17,51 @@ export const TwitchCredentialsInput: React.FC<TwitchCredentialsProps> = ({ onSav
     e.preventDefault();
     setError(null);
     
-    if (clientId && accessToken) {
-      setIsValidating(true);
-      
-      // Clean inputs for validation check (same as service will do)
-      const cleanId = clientId.trim();
-      const cleanToken = accessToken.replace(/^Bearer\s+/i, '').replace(/^oauth:/i, '').trim();
+    // Allow submission if we have (ID + Token) OR (ID + Secret)
+    // If user provides secret but no token, we can try to validate by generating one? 
+    // For simplicity, we require ID and Token to validate immediate access, 
+    // OR just ID and Secret to generate a token.
+    
+    if (!clientId) {
+      setError("Client ID is required.");
+      return;
+    }
 
-      const isValid = await validateCredentials(cleanId, cleanToken);
-      setIsValidating(false);
+    if (!accessToken && !clientSecret) {
+      setError("Please provide either an Access Token or a Client Secret.");
+      return;
+    }
 
-      if (isValid) {
-        onSave({ clientId: cleanId, accessToken: cleanToken });
-      } else {
-        setError("Invalid credentials. Please check your Client ID and Access Token.");
-      }
+    setIsValidating(true);
+    
+    const cleanId = clientId.trim();
+    const cleanSecret = clientSecret.trim();
+    let cleanToken = accessToken.replace(/^Bearer\s+/i, '').replace(/^oauth:/i, '').trim();
+
+    // If no token but we have secret, validation happens during main app flow (it will generate one)
+    // But to be safe here, let's validate what we have.
+    
+    let isValid = false;
+
+    if (cleanToken) {
+      isValid = await validateCredentials(cleanId, cleanToken);
+    } else if (cleanSecret) {
+       // If only secret provided, we assume valid for now and let the App generate the token.
+       // Or we could trigger generation here, but that duplicates logic.
+       // Let's rely on the App to generate if token is empty.
+       isValid = true; 
+    }
+
+    setIsValidating(false);
+
+    if (isValid) {
+      onSave({ 
+        clientId: cleanId, 
+        accessToken: cleanToken, 
+        clientSecret: cleanSecret || undefined 
+      });
+    } else {
+      setError("Invalid credentials. Please check your Client ID and Access Token.");
     }
   };
 
@@ -47,12 +78,12 @@ export const TwitchCredentialsInput: React.FC<TwitchCredentialsProps> = ({ onSav
         </div>
         
         <p className="text-gray-300 text-sm mb-6">
-          To query the Twitch API directly, you need a Client ID and Access Token. 
+          Enter your Twitch Developer credentials. Providing a <strong>Client Secret</strong> allows the app to automatically refresh tokens when they expire.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-bold text-gray-400 mb-1 uppercase">Client ID</label>
+            <label className="block text-xs font-bold text-gray-400 mb-1 uppercase">Client ID <span className="text-red-500">*</span></label>
             <input 
               type="text" 
               value={clientId}
@@ -65,17 +96,27 @@ export const TwitchCredentialsInput: React.FC<TwitchCredentialsProps> = ({ onSav
           </div>
           
           <div>
+            <label className="block text-xs font-bold text-gray-400 mb-1 uppercase">Client Secret <span className="text-gray-500 font-normal lowercase">(Recommended)</span></label>
+            <input 
+              type="password" 
+              value={clientSecret}
+              onChange={e => setClientSecret(e.target.value)}
+              className="w-full bg-twitch-bg border border-gray-700 rounded p-3 text-white focus:border-twitch focus:ring-1 focus:ring-twitch outline-none transition-colors"
+              placeholder="Optional but required for auto-refresh"
+              disabled={isValidating}
+            />
+          </div>
+
+          <div>
             <label className="block text-xs font-bold text-gray-400 mb-1 uppercase">App Access Token</label>
             <input 
               type="password" 
               value={accessToken}
               onChange={e => setAccessToken(e.target.value)}
               className="w-full bg-twitch-bg border border-gray-700 rounded p-3 text-white focus:border-twitch focus:ring-1 focus:ring-twitch outline-none transition-colors"
-              placeholder="2gbdx6oar67tqtcmt09c34a17fvqki"
-              required
+              placeholder="Leave empty if using Secret to generate"
               disabled={isValidating}
             />
-            <p className="text-[10px] text-gray-500 mt-1">If using CLI, paste the token without 'Bearer' prefix.</p>
           </div>
 
           {error && (
@@ -89,7 +130,7 @@ export const TwitchCredentialsInput: React.FC<TwitchCredentialsProps> = ({ onSav
 
           <div className="bg-gray-800 p-3 rounded text-xs text-gray-400">
              <p className="mb-1"><strong>How to get this?</strong></p>
-             <p>Register an app on <a href="https://dev.twitch.tv/console" target="_blank" className="text-twitch-light hover:underline">Twitch Console</a>. Then use CLI or tools to generate an App Access Token.</p>
+             <p>Register an app on <a href="https://dev.twitch.tv/console" target="_blank" className="text-twitch-light hover:underline">Twitch Console</a>.</p>
           </div>
 
           <button 
