@@ -1,0 +1,5 @@
+{
+  "name": "StreamWatcher AI",
+  "description": "Monitor Twitch channels for live status using AI-powered search, with configurable script generation for local playback.",
+  "requestFramePermissions": []
+}
