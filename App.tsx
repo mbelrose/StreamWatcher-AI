@@ -4,7 +4,7 @@ import { ScriptSettings } from './components/ScriptSettings';
 import { LiveCard } from './components/LiveCard';
 import { Toast } from './components/Toast';
 import { TwitchCredentialsInput } from './components/TwitchCredentials';
-import { getStreams, validateCredentials } from './services/twitchService';
+import { getStreams, generateAppAccessToken } from './services/twitchService';
 import { ChannelStatus, ToastMessage, TwitchCredentials } from './types';
 import { DEFAULT_CHANNELS, DEFAULT_COMMAND_TEMPLATE, POLLING_INTERVALS } from './constants';
 
@@ -14,24 +14,35 @@ const App: React.FC = () => {
   const [commandTemplate, setCommandTemplate] = useState<string>(DEFAULT_COMMAND_TEMPLATE);
   const [isPolling, setIsPolling] = useState(false);
   const [pollingInterval, setPollingInterval] = useState(2);
-  // Track which channels we have already alerted for in the current "Live" session
   const [lastAlerted, setLastAlerted] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isChecking, setIsChecking] = useState(false);
   const [creds, setCreds] = useState<TwitchCredentials | null>(null);
 
-  // Load creds from local storage
+  // Load creds from env or local storage
   useEffect(() => {
+    const envClientId = process.env.TWITCH_CLIENT_ID;
+    const envSecret = process.env.TWITCH_CLIENT_SECRET;
+    const envToken = process.env.TWITCH_ACCESS_TOKEN;
+
     const savedClientId = localStorage.getItem('twitch_client_id');
     const savedAccessToken = localStorage.getItem('twitch_access_token');
-    // Also check env vars for convenience
-    const envClientId = process.env.TWITCH_CLIENT_ID;
-    const envAccessToken = process.env.TWITCH_ACCESS_TOKEN;
+    const savedClientSecret = localStorage.getItem('twitch_client_secret');
 
-    if (savedClientId && savedAccessToken) {
-      setCreds({ clientId: savedClientId, accessToken: savedAccessToken });
-    } else if (envClientId && envAccessToken) {
-      setCreds({ clientId: envClientId, accessToken: envAccessToken });
+    if (envClientId && envSecret) {
+      // Prioritize environment variables for headless/Linux setup
+      setCreds({
+        clientId: envClientId,
+        clientSecret: envSecret,
+        // Use provided token, or fallback to saved token, or empty (to trigger generation)
+        accessToken: envToken || savedAccessToken || ''
+      });
+    } else if (savedClientId && savedAccessToken) {
+      setCreds({ 
+        clientId: savedClientId, 
+        accessToken: savedAccessToken,
+        clientSecret: savedClientSecret || undefined
+      });
     }
   }, []);
 
@@ -39,6 +50,9 @@ const App: React.FC = () => {
     setCreds(newCreds);
     localStorage.setItem('twitch_client_id', newCreds.clientId);
     localStorage.setItem('twitch_access_token', newCreds.accessToken);
+    if (newCreds.clientSecret) {
+      localStorage.setItem('twitch_client_secret', newCreds.clientSecret);
+    }
   }, []);
 
   const addToast = (title: string, message: string, type: ToastMessage['type'] = 'info') => {
@@ -50,83 +64,121 @@ const App: React.FC = () => {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
 
+  const processChannelData = (liveStreams: ChannelStatus[]) => {
+    const liveStreamMap = new Map<string, ChannelStatus>();
+    liveStreams.forEach(s => liveStreamMap.set(s.name.toLowerCase(), s));
+
+    setStatuses((prev: Map<string, ChannelStatus>) => {
+      const next = new Map<string, ChannelStatus>(prev);
+      const nextAlerted = new Set(lastAlerted);
+      let hasAlertUpdates = false;
+
+      channels.forEach(channelRaw => {
+        const channelKey = channelRaw.toLowerCase();
+        const existing = next.get(channelKey);
+        const liveData = liveStreamMap.get(channelKey);
+
+        if (liveData) {
+          // Channel is Live
+          if (!existing?.isLive) {
+            // Was not live before (or new)
+            if (!nextAlerted.has(channelKey)) {
+              addToast('Channel Live!', `${liveData.name} is now live playing ${liveData.game || 'something'}!`, 'success');
+              try {
+                  const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+                  audio.volume = 0.4;
+                  audio.play().catch(() => {});
+              } catch {}
+              
+              nextAlerted.add(channelKey);
+              hasAlertUpdates = true;
+            }
+          }
+          
+          next.set(channelKey, { ...liveData, name: channelRaw });
+        } else {
+          // Channel is Offline
+          if (existing?.isLive) {
+            nextAlerted.delete(channelKey);
+            hasAlertUpdates = true;
+          }
+          
+          next.set(channelKey, {
+            name: channelRaw,
+            isLive: false,
+            lastChecked: Date.now(),
+            lastChanged: existing?.isLive ? Date.now() : (existing?.lastChanged || Date.now())
+          });
+        }
+      });
+
+      if (hasAlertUpdates) {
+        setLastAlerted(nextAlerted);
+      }
+      return next;
+    });
+  };
+
   const checkStatus = useCallback(async () => {
     if (isChecking || !creds) return;
     setIsChecking(true);
 
+    let activeToken = creds.accessToken;
+    let fetchedStreams: ChannelStatus[] | null = null;
+
     try {
-      const liveStreams = await getStreams(channels, creds.clientId, creds.accessToken);
-      
-      const liveStreamMap = new Map<string, ChannelStatus>();
-      liveStreams.forEach(s => liveStreamMap.set(s.name.toLowerCase(), s));
-
-      setStatuses((prev: Map<string, ChannelStatus>) => {
-        const next = new Map<string, ChannelStatus>(prev);
-        const nextAlerted = new Set(lastAlerted);
-        let hasAlertUpdates = false;
-
-        channels.forEach(channelRaw => {
-          const channelKey = channelRaw.toLowerCase();
-          const existing = next.get(channelKey);
-          const liveData = liveStreamMap.get(channelKey);
-
-          if (liveData) {
-            // Channel is Live
-            if (!existing?.isLive) {
-              // Was not live before (or new)
-              if (!nextAlerted.has(channelKey)) {
-                // Alert!
-                addToast('Channel Live!', `${liveData.name} is now live playing ${liveData.game || 'something'}!`, 'success');
-                try {
-                   const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
-                   audio.volume = 0.4;
-                   audio.play().catch(() => {});
-                } catch {}
-                
-                nextAlerted.add(channelKey);
-                hasAlertUpdates = true;
-              }
-            }
-            
-            // Update Data
-            next.set(channelKey, { ...liveData, name: channelRaw }); // Keep original casing if possible, or use API casing
-          } else {
-            // Channel is Offline
-            if (existing?.isLive) {
-              // Was live, now offline
-              nextAlerted.delete(channelKey);
-              hasAlertUpdates = true;
-            }
-            
-            next.set(channelKey, {
-              name: channelRaw,
-              isLive: false,
-              lastChecked: Date.now(),
-              lastChanged: existing?.isLive ? Date.now() : (existing?.lastChanged || Date.now())
-            });
-          }
-        });
-
-        if (hasAlertUpdates) {
-          setLastAlerted(nextAlerted);
+      // 1. If we have a secret but no token (or empty token), generate one first
+      if (!activeToken && creds.clientSecret) {
+        try {
+          const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
+          handleSaveCreds({ ...creds, accessToken: newToken });
+          activeToken = newToken;
+        } catch (genError: any) {
+          addToast('Auth Error', `Could not generate token: ${genError.message}`, 'error');
+          setIsChecking(false);
+          return;
         }
-        return next;
-      });
+      }
+
+      // 2. Try fetching streams
+      try {
+        fetchedStreams = await getStreams(channels, creds.clientId, activeToken);
+      } catch (e: any) {
+        // 3. Handle Unauthorized: Retry with refresh if secret is available
+        if (e.message.includes('Unauthorized') && creds.clientSecret) {
+          console.log('Token expired or invalid, attempting refresh...');
+          try {
+            const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
+            handleSaveCreds({ ...creds, accessToken: newToken });
+            // Retry fetch with new token
+            fetchedStreams = await getStreams(channels, creds.clientId, newToken);
+          } catch (refreshErr: any) {
+            throw new Error(`Failed to refresh token: ${refreshErr.message}`);
+          }
+        } else {
+          throw e; // Propagate other errors or if no secret available
+        }
+      }
+
+      if (fetchedStreams) {
+        processChannelData(fetchedStreams);
+      }
 
     } catch (e: any) {
+      console.error(e);
       addToast('Check Failed', e.message || 'Error querying Twitch API', 'error');
       if (e.message.includes('Unauthorized')) {
-        setCreds(null); // Force re-login
+        setCreds(null); // Force re-login or check of env vars
       }
     } finally {
       setIsChecking(false);
     }
-  }, [channels, creds, isChecking, lastAlerted]);
+  }, [channels, creds, isChecking, lastAlerted, handleSaveCreds]);
 
   // Interval Effect
   useEffect(() => {
     if (!isPolling || !creds) return;
-    checkStatus(); // Initial
+    checkStatus(); // Initial check
     const intervalId = setInterval(checkStatus, pollingInterval * 60 * 1000);
     return () => clearInterval(intervalId);
   }, [isPolling, pollingInterval, creds, checkStatus]);

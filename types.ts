@@ -19,4 +19,5 @@ export interface ToastMessage {
 export interface TwitchCredentials {
   clientId: string;
   accessToken: string;
+  clientSecret?: string;
 }

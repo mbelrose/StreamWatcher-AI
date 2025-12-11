@@ -1,5 +1,29 @@
 import { ChannelStatus } from "../types";
 
+// Helper to clean tokens (remove Bearer/oauth prefixes if pasted)
+const cleanToken = (token: string) => token.replace(/^Bearer\s+/i, '').replace(/^oauth:/i, '').trim();
+const cleanClientId = (id: string) => id.trim();
+
+export const generateAppAccessToken = async (clientId: string, clientSecret: string): Promise<string> => {
+  const params = new URLSearchParams();
+  params.append('client_id', cleanClientId(clientId));
+  params.append('client_secret', cleanToken(clientSecret));
+  params.append('grant_type', 'client_credentials');
+
+  const response = await fetch('https://id.twitch.tv/oauth2/token', {
+    method: 'POST',
+    body: params
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to generate token: ${response.status} ${text}`);
+  }
+
+  const data = await response.json();
+  return data.access_token;
+};
+
 export const getStreams = async (
   channels: string[],
   clientId: string,
@@ -14,6 +38,8 @@ export const getStreams = async (
   }
 
   let allStreams: any[] = [];
+  const safeClientId = cleanClientId(clientId);
+  const safeToken = cleanToken(accessToken);
 
   for (const chunk of chunks) {
     const params = new URLSearchParams();
@@ -22,8 +48,8 @@ export const getStreams = async (
     try {
       const response = await fetch(`https://api.twitch.tv/helix/streams?${params.toString()}`, {
         headers: {
-          'Client-Id': clientId,
-          'Authorization': `Bearer ${accessToken}`
+          'Client-Id': safeClientId,
+          'Authorization': `Bearer ${safeToken}`
         }
       });
 
@@ -38,7 +64,11 @@ export const getStreams = async (
       const data = await response.json();
       allStreams = [...allStreams, ...data.data];
     } catch (e) {
-      console.error("Failed to fetch streams chunk", e);
+      if (e instanceof Error) {
+        // Propagate auth errors immediately
+        if (e.message.includes("Unauthorized")) throw e;
+        console.warn("Failed to fetch streams chunk", e.message);
+      }
       throw e;
     }
   }
@@ -57,10 +87,10 @@ export const getStreams = async (
 
 export const validateCredentials = async (clientId: string, accessToken: string): Promise<boolean> => {
   try {
-    const response = await fetch('https://api.twitch.tv/helix/users?id=44322889', {
+    const response = await fetch('https://api.twitch.tv/helix/streams?first=1', {
       headers: {
-        'Client-Id': clientId,
-        'Authorization': `Bearer ${accessToken}`
+        'Client-Id': cleanClientId(clientId),
+        'Authorization': `Bearer ${cleanToken(accessToken)}`
       }
     });
     return response.ok;
