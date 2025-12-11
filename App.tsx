@@ -19,31 +19,67 @@ const App: React.FC = () => {
   const [isChecking, setIsChecking] = useState(false);
   const [creds, setCreds] = useState<TwitchCredentials | null>(null);
 
-  // Load creds from env or local storage
+  // Load creds from config file, env, or local storage
   useEffect(() => {
-    const envClientId = process.env.TWITCH_CLIENT_ID;
-    const envSecret = process.env.TWITCH_CLIENT_SECRET;
-    const envToken = process.env.TWITCH_ACCESS_TOKEN;
+    const initCredentials = async () => {
+      let finalCreds: TwitchCredentials | null = null;
 
-    const savedClientId = localStorage.getItem('twitch_client_id');
-    const savedAccessToken = localStorage.getItem('twitch_access_token');
-    const savedClientSecret = localStorage.getItem('twitch_client_secret');
+      // 1. Try Config File
+      try {
+        const response = await fetch('/config.json');
+        if (response.ok) {
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const config = await response.json();
+            // Support both camelCase and UPPER_CASE keys
+            const cId = config.clientId || config.TWITCH_CLIENT_ID;
+            const cSecret = config.clientSecret || config.TWITCH_CLIENT_SECRET;
+            const cToken = config.accessToken || config.TWITCH_ACCESS_TOKEN;
 
-    if (envClientId && envSecret) {
-      // Prioritize environment variables for headless/Linux setup
-      setCreds({
-        clientId: envClientId,
-        clientSecret: envSecret,
-        // Use provided token, or fallback to saved token, or empty (to trigger generation)
-        accessToken: envToken || savedAccessToken || ''
-      });
-    } else if (savedClientId && savedAccessToken) {
-      setCreds({ 
-        clientId: savedClientId, 
-        accessToken: savedAccessToken,
-        clientSecret: savedClientSecret || undefined
-      });
-    }
+            if (cId) {
+              console.log("Loaded credentials from config.json");
+              finalCreds = {
+                clientId: cId,
+                clientSecret: cSecret,
+                accessToken: cToken || '' // Empty token will trigger generation if secret exists
+              };
+            }
+          }
+        }
+      } catch (err) {
+        // Config file optional/missing
+      }
+
+      // 2. Fallback to Environment Variables
+      if (!finalCreds && process.env.TWITCH_CLIENT_ID) {
+        finalCreds = {
+          clientId: process.env.TWITCH_CLIENT_ID,
+          clientSecret: process.env.TWITCH_CLIENT_SECRET,
+          accessToken: process.env.TWITCH_ACCESS_TOKEN || ''
+        };
+      }
+
+      // 3. Fallback to LocalStorage
+      if (!finalCreds) {
+        const savedId = localStorage.getItem('twitch_client_id');
+        const savedToken = localStorage.getItem('twitch_access_token');
+        const savedSecret = localStorage.getItem('twitch_client_secret');
+
+        if (savedId && savedToken) {
+          finalCreds = {
+            clientId: savedId,
+            accessToken: savedToken,
+            clientSecret: savedSecret || undefined
+          };
+        }
+      }
+
+      if (finalCreds) {
+        setCreds(finalCreds);
+      }
+    };
+
+    initCredentials();
   }, []);
 
   const handleSaveCreds = useCallback((newCreds: TwitchCredentials) => {
@@ -125,14 +161,16 @@ const App: React.FC = () => {
 
     let activeToken = creds.accessToken;
     let fetchedStreams: ChannelStatus[] | null = null;
+    let tokenChanged = false;
 
     try {
       // 1. If we have a secret but no token (or empty token), generate one first
-      if (!activeToken && creds.clientSecret) {
+      if ((!activeToken || activeToken.length === 0) && creds.clientSecret) {
         try {
+          console.log("Token missing, generating new one...");
           const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
-          handleSaveCreds({ ...creds, accessToken: newToken });
           activeToken = newToken;
+          tokenChanged = true;
         } catch (genError: any) {
           addToast('Auth Error', `Could not generate token: ${genError.message}`, 'error');
           setIsChecking(false);
@@ -149,7 +187,8 @@ const App: React.FC = () => {
           console.log('Token expired or invalid, attempting refresh...');
           try {
             const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
-            handleSaveCreds({ ...creds, accessToken: newToken });
+            activeToken = newToken;
+            tokenChanged = true;
             // Retry fetch with new token
             fetchedStreams = await getStreams(channels, creds.clientId, newToken);
           } catch (refreshErr: any) {
@@ -160,6 +199,10 @@ const App: React.FC = () => {
         }
       }
 
+      if (tokenChanged) {
+        handleSaveCreds({ ...creds, accessToken: activeToken });
+      }
+
       if (fetchedStreams) {
         processChannelData(fetchedStreams);
       }
@@ -167,8 +210,9 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error(e);
       addToast('Check Failed', e.message || 'Error querying Twitch API', 'error');
-      if (e.message.includes('Unauthorized')) {
-        setCreds(null); // Force re-login or check of env vars
+      // Only clear creds if we absolutely cannot recover (no secret to regenerate)
+      if (e.message.includes('Unauthorized') && !creds.clientSecret) {
+        setCreds(null);
       }
     } finally {
       setIsChecking(false);
