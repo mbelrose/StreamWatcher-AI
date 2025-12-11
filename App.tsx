@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChannelInput } from './components/ChannelInput';
 import { ScriptSettings } from './components/ScriptSettings';
@@ -24,27 +25,34 @@ const App: React.FC = () => {
     const initCredentials = async () => {
       let finalCreds: TwitchCredentials | null = null;
       let source = "none";
+      let configData: any = null;
 
-      // 1. Try Config File
+      // 1. Try Config File (Electron IPC or Fetch)
       try {
-        const response = await fetch('/config.json');
-        if (response.ok) {
-          const contentType = response.headers.get('content-type');
-          if (contentType && contentType.includes('application/json')) {
-            const config = await response.json();
-            // Support both camelCase and UPPER_CASE keys
-            const cId = config.clientId || config.TWITCH_CLIENT_ID;
-            const cSecret = config.clientSecret || config.TWITCH_CLIENT_SECRET;
-            const cToken = config.accessToken || config.TWITCH_ACCESS_TOKEN;
-
-            if (cId) {
-              finalCreds = {
-                clientId: cId,
-                clientSecret: cSecret,
-                accessToken: cToken || '' // Empty token will trigger generation if secret exists
-              };
-              source = "config.json";
+        if (window.electron) {
+          configData = await window.electron.readConfig();
+        } else {
+          const response = await fetch('/config.json');
+          if (response.ok) {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              configData = await response.json();
             }
+          }
+        }
+
+        if (configData) {
+          const cId = configData.clientId || configData.TWITCH_CLIENT_ID;
+          const cSecret = configData.clientSecret || configData.TWITCH_CLIENT_SECRET;
+          const cToken = configData.accessToken || configData.TWITCH_ACCESS_TOKEN;
+
+          if (cId) {
+            finalCreds = {
+              clientId: cId,
+              clientSecret: cSecret,
+              accessToken: cToken || '' 
+            };
+            source = window.electron ? "config.json (local)" : "config.json (web)";
           }
         }
       } catch (err) {
@@ -54,7 +62,7 @@ const App: React.FC = () => {
       // 2. Fallback to Environment Variables
       if (!finalCreds && process.env.TWITCH_CLIENT_ID) {
         finalCreds = {
-          clientId: process.env.TWITCH_CLIENT_ID,
+          clientId: process.env.TWITCH_CLIENT_ID || '',
           clientSecret: process.env.TWITCH_CLIENT_SECRET,
           accessToken: process.env.TWITCH_ACCESS_TOKEN || ''
         };
@@ -79,9 +87,7 @@ const App: React.FC = () => {
 
       if (finalCreds) {
         console.log(`[TwitchAuth] Credentials loaded from ${source}.`);
-        console.log(`[TwitchAuth] Client ID: ${finalCreds.clientId.substring(0, 4)}...`);
         console.log(`[TwitchAuth] Secret Present: ${!!finalCreds.clientSecret}`);
-        console.log(`[TwitchAuth] Access Token Present: ${!!finalCreds.accessToken}`);
         setCreds(finalCreds);
       } else {
         console.log(`[TwitchAuth] No credentials found.`);
@@ -98,10 +104,6 @@ const App: React.FC = () => {
     localStorage.setItem('twitch_access_token', newCreds.accessToken);
     if (newCreds.clientSecret) {
       localStorage.setItem('twitch_client_secret', newCreds.clientSecret);
-    } else {
-      // If no secret provided in update, do NOT remove existing one from local storage?
-      // Actually, if user updates creds manually, they might want to clear it.
-      // But for internal updates (token refresh), we pass the existing secret, so this is safe.
     }
   }, []);
 
@@ -178,11 +180,11 @@ const App: React.FC = () => {
     let tokenChanged = false;
 
     try {
-      // 1. If we have a secret but no token (or empty token), generate one first
+      // 1. Generate token if missing but secret exists
       if ((!activeToken || activeToken.length === 0)) {
         if (creds.clientSecret) {
             try {
-              console.log("[TwitchAuth] Token missing, generating new one using secret...");
+              console.log("[TwitchAuth] Token missing, generating new one...");
               const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
               activeToken = newToken;
               tokenChanged = true;
@@ -192,44 +194,41 @@ const App: React.FC = () => {
               return;
             }
         } else {
-             // No token and no secret
              addToast('Auth Error', 'Missing Access Token and Client Secret', 'error');
-             setCreds(null); // Force logout to re-enter
+             setCreds(null); 
              setIsChecking(false);
              return;
         }
       }
 
-      // 2. Try fetching streams
+      // 2. Fetch streams
       try {
         fetchedStreams = await getStreams(channels, creds.clientId, activeToken);
       } catch (e: any) {
         // 3. Handle Unauthorized: Retry with refresh if secret is available
         if (e.message.includes('Unauthorized') || e.message.includes('401')) {
-          console.log('[TwitchAuth] Token expired or invalid (401).');
+          console.log('[TwitchAuth] Token expired (401).');
           if (creds.clientSecret) {
-            console.log('[TwitchAuth] Attempting refresh using Client Secret...');
+            console.log('[TwitchAuth] Refreshing using Secret...');
             try {
               const newToken = await generateAppAccessToken(creds.clientId, creds.clientSecret);
               activeToken = newToken;
               tokenChanged = true;
-              // Retry fetch with new token
               fetchedStreams = await getStreams(channels, creds.clientId, newToken);
               console.log('[TwitchAuth] Refresh successful.');
             } catch (refreshErr: any) {
               throw new Error(`Failed to refresh token: ${refreshErr.message}`);
             }
           } else {
-            console.error('[TwitchAuth] Cannot refresh: No Client Secret available.');
+            console.error('[TwitchAuth] Cannot refresh: No Secret.');
             throw e; 
           }
         } else {
-          throw e; // Propagate other errors
+          throw e; 
         }
       }
 
       if (tokenChanged) {
-        // IMPORTANT: Pass the existing secret back so it isn't lost
         handleSaveCreds({ 
             clientId: creds.clientId,
             accessToken: activeToken,
@@ -244,7 +243,6 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error(e);
       addToast('Check Failed', e.message || 'Error querying Twitch API', 'error');
-      // Only clear creds if we absolutely cannot recover (no secret to regenerate)
       if ((e.message.includes('Unauthorized') || e.message.includes('401')) && !creds.clientSecret) {
         setCreds(null);
       }
@@ -256,7 +254,7 @@ const App: React.FC = () => {
   // Interval Effect
   useEffect(() => {
     if (!isPolling || !creds) return;
-    checkStatus(); // Initial check
+    checkStatus(); 
     const intervalId = setInterval(checkStatus, pollingInterval * 60 * 1000);
     return () => clearInterval(intervalId);
   }, [isPolling, pollingInterval, creds, checkStatus]);
@@ -270,7 +268,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-twitch-bg text-gray-100 font-sans selection:bg-twitch selection:text-white">
       {/* Header */}
-      <header className="bg-twitch-surface border-b border-black shadow-lg sticky top-0 z-20">
+      <header className={`bg-twitch-surface border-b border-black shadow-lg sticky top-0 z-20 ${window.electron ? 'drag-region' : ''}`}>
         <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3">
              <div className="w-8 h-8 bg-twitch rounded flex items-center justify-center shadow-lg shadow-twitch/20">
@@ -278,10 +276,10 @@ const App: React.FC = () => {
                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.866v6.268a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
              </div>
-             <h1 className="text-xl font-bold tracking-tight">StreamWatcher</h1>
+             <h1 className="text-xl font-bold tracking-tight">StreamWatcher <span className="text-xs font-normal text-gray-400 opacity-50">{window.electron ? 'Desktop' : 'Web'}</span></h1>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 no-drag">
              <div className="flex items-center gap-2 bg-gray-900 rounded p-1 border border-gray-800">
                 <span className="text-xs text-gray-400 px-2 uppercase font-bold tracking-wider">Poll Interval</span>
                 <select 
@@ -334,7 +332,6 @@ const App: React.FC = () => {
           <ChannelInput channels={channels} setChannels={setChannels} />
           <ScriptSettings template={commandTemplate} setTemplate={setCommandTemplate} />
           
-          {/* Stats / Info */}
           <div className="bg-twitch-surface p-6 rounded-lg shadow-lg border border-gray-800">
              <h3 className="text-lg font-bold text-white mb-2">Status Log</h3>
              <div className="text-sm text-gray-400 space-y-1">
@@ -344,7 +341,6 @@ const App: React.FC = () => {
                 {creds && (
                     <div className="mt-2 pt-2 border-t border-gray-800 text-xs">
                         <p>Credentials loaded via <span className="text-twitch-light">
-                           {/* Simple heuristic to display source type could go here, but we just log it to console for debug */}
                            {creds.clientSecret ? 'Config/Env (Auto-refresh enabled)' : 'Manual Entry (No auto-refresh)'}
                         </span></p>
                     </div>
@@ -384,7 +380,6 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      {/* Toast Container */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end pointer-events-none gap-2">
          <div className="pointer-events-auto">
            {toasts.map(toast => (
@@ -392,6 +387,13 @@ const App: React.FC = () => {
            ))}
          </div>
       </div>
+      
+      {window.electron && (
+        <style>{`
+          .drag-region { -webkit-app-region: drag; }
+          .no-drag { -webkit-app-region: no-drag; }
+        `}</style>
+      )}
     </div>
   );
 };

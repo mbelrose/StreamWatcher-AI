@@ -1,3 +1,4 @@
+
 export interface ChannelStatus {
   name: string;
   isLive: boolean;
@@ -20,4 +21,13 @@ export interface TwitchCredentials {
   clientId: string;
   accessToken: string;
   clientSecret?: string;
+}
+
+declare global {
+  interface Window {
+    electron?: {
+      launchCommand: (command: string) => Promise<string>;
+      readConfig: () => Promise<any>;
+    };
+  }
 }

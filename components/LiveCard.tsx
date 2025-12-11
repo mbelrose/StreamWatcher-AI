@@ -1,4 +1,5 @@
-import React from 'react';
+
+import React, { useState } from 'react';
 import { ChannelStatus } from '../types';
 
 interface LiveCardProps {
@@ -7,12 +8,29 @@ interface LiveCardProps {
 }
 
 export const LiveCard: React.FC<LiveCardProps> = ({ status, commandTemplate }) => {
+  const [feedback, setFeedback] = useState<string | null>(null);
   const channelUrl = `https://twitch.tv/${status.name}`;
 
-  const handleCopyCommand = () => {
+  const handleAction = async () => {
     const command = commandTemplate.replace(/{{url}}/g, channelUrl);
-    navigator.clipboard.writeText(command);
+    
+    if (window.electron) {
+      try {
+        await window.electron.launchCommand(command);
+        setFeedback("Launched");
+      } catch (e) {
+        setFeedback("Error");
+        console.error(e);
+      }
+    } else {
+      navigator.clipboard.writeText(command);
+      setFeedback("Copied");
+    }
+
+    setTimeout(() => setFeedback(null), 2000);
   };
+
+  const isElectron = !!window.electron;
 
   return (
     <div className="bg-twitch-surface rounded-lg overflow-hidden shadow-lg border border-twitch-dark/30 hover:border-twitch-light/50 transition-all group flex flex-col">
@@ -54,17 +72,30 @@ export const LiveCard: React.FC<LiveCardProps> = ({ status, commandTemplate }) =
 
         <div className="mt-auto pt-2 border-t border-gray-800">
            <button
-             onClick={handleCopyCommand}
-             className="w-full flex items-center justify-center gap-2 bg-twitch hover:bg-twitch-light text-white text-sm font-bold py-2 px-4 rounded transition-colors shadow-md active:translate-y-0.5"
-             title="Copy launch command to clipboard"
+             onClick={handleAction}
+             className={`w-full flex items-center justify-center gap-2 text-white text-sm font-bold py-2 px-4 rounded transition-colors shadow-md active:translate-y-0.5
+               ${feedback === 'Error' ? 'bg-red-600 hover:bg-red-700' : 'bg-twitch hover:bg-twitch-light'}
+             `}
+             title={isElectron ? "Launch stream" : "Copy launch command"}
            >
-             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-             </svg>
-             Launch Script
+             {feedback ? (
+               <span>{feedback}!</span>
+             ) : (
+               <>
+                 {isElectron ? (
+                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                   </svg>
+                 ) : (
+                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                   </svg>
+                 )}
+                 {isElectron ? "Launch" : "Copy Command"}
+               </>
+             )}
            </button>
-           <p className="text-[10px] text-gray-500 text-center mt-1">Copies command to clipboard</p>
         </div>
       </div>
     </div>
